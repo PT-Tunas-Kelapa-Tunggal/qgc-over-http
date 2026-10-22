@@ -41,12 +41,17 @@ set(QGC_CREATE_DMG_ARGS
     --volname "${QGC_TARGET_APP_NAME}"
     --filesystem APFS
 )
-list(APPEND QGC_CREATE_DMG_ARGS --window-pos ${QGC_DMG_WINDOW_POS})
-list(APPEND QGC_CREATE_DMG_ARGS --window-size ${QGC_DMG_WINDOW_SIZE})
-list(APPEND QGC_CREATE_DMG_ARGS --icon-size ${QGC_DMG_ICON_SIZE})
-list(APPEND QGC_CREATE_DMG_ARGS --icon "${QGC_TARGET_APP_BUNDLE}" ${QGC_DMG_APP_ICON_POS})
-# Drop target drives drag-and-drop install experience for Applications folder
-list(APPEND QGC_CREATE_DMG_ARGS --app-drop-link ${QGC_DMG_DROP_ICON_POS})
+# In CI or non-GUI environments, skip Finder AppleScript to prevent AppleEvent timeouts
+if(DEFINED ENV{CI} OR DEFINED ENV{QGC_SKIP_DMG_LAYOUT})
+    list(APPEND QGC_CREATE_DMG_ARGS --skip-jenkins)
+else()
+    list(APPEND QGC_CREATE_DMG_ARGS --window-pos ${QGC_DMG_WINDOW_POS})
+    list(APPEND QGC_CREATE_DMG_ARGS --window-size ${QGC_DMG_WINDOW_SIZE})
+    list(APPEND QGC_CREATE_DMG_ARGS --icon-size ${QGC_DMG_ICON_SIZE})
+    list(APPEND QGC_CREATE_DMG_ARGS --icon "${QGC_TARGET_APP_BUNDLE}" ${QGC_DMG_APP_ICON_POS})
+    # Drop target drives drag-and-drop install experience for Applications folder
+    list(APPEND QGC_CREATE_DMG_ARGS --app-drop-link ${QGC_DMG_DROP_ICON_POS})
+endif()
 list(APPEND QGC_CREATE_DMG_ARGS "${QGC_DMG_NAME}" "${QGC_DMG_PATH}/")
 
 execute_process(
