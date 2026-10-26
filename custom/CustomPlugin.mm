@@ -25,6 +25,9 @@
 #import <Foundation/Foundation.h>
 #endif
 
+#include "SurveyGeneratorService.h"
+#include <QtCore/QMetaObject>
+
 QGC_LOGGING_CATEGORY(CustomPluginLog, "Custom.Plugin")
 
 Q_APPLICATION_STATIC(CustomPlugin, _customPluginInstance);
@@ -88,7 +91,7 @@ void CustomPlugin::_startServer()
     qCDebug(CustomPluginLog) << "macOS App Nap disabled via NSProcessInfo assertion";
 #endif
 
-    // Start minimal health-check HTTP server on port 18080
+    // Start minimal HTTP server on port 18080
     s_httpServer = std::make_unique<httplib::Server>();
 
     s_httpServer->Get("/healthz", [](const httplib::Request &, httplib::Response &res) {
@@ -96,6 +99,19 @@ void CustomPlugin::_startServer()
             "{\"status\":\"ok\",\"service\":\"qgc-embedded-engine\"}\n",
             "application/json"
         );
+    });
+
+    s_httpServer->Post("/api/v1/plan/survey", [](const httplib::Request &req, httplib::Response &res) {
+        std::string responseBody;
+        int statusCode = 200;
+
+        // Dispatched synchronously to the Qt main GUI thread
+        QMetaObject::invokeMethod(qGuiApp, [&]() {
+            statusCode = SurveyGeneratorService::generateSurveyPlan(req.body, responseBody);
+        }, Qt::BlockingQueuedConnection);
+
+        res.status = statusCode;
+        res.set_content(responseBody, "application/json");
     });
 
     s_httpThread = std::make_unique<std::thread>([]() {
