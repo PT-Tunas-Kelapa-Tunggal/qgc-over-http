@@ -80,7 +80,7 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
     const double gridAngle = params.value(QStringLiteral("gridAngle")).toDouble(0.0);
     const double turnaroundDistance = params.value(QStringLiteral("turnaroundDistance")).toDouble(10.0);
     const bool hoverAndCapture = params.value(QStringLiteral("hoverAndCapture")).toBool(false);
-    const bool useCameraOverlap = params.value(QStringLiteral("useCameraOverlap")).toBool(true);
+    const bool useCameraOverlap = params.value(QStringLiteral("useCameraOverlap")).toBool(false);
 
     double frontalOverlap = params.value(QStringLiteral("frontalOverlap")).toDouble(70.0);
     double sideOverlap = params.value(QStringLiteral("sideOverlap")).toDouble(70.0);
@@ -91,8 +91,9 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
         sideOverlap *= 100.0;
     }
 
-    const double spacing = params.value(QStringLiteral("spacing")).toDouble(25.0);
-    const double triggerDistance = params.value(QStringLiteral("triggerDistance")).toDouble(25.0);
+    const double spacing = params.value(QStringLiteral("spacing")).toDouble(20.0);
+    const double triggerDistance = params.value(QStringLiteral("triggerDistance")).toDouble(15.0);
+    const int entryLocation = params.value(QStringLiteral("entryLocation")).toInt(0);
     const int firmwareType = params.value(QStringLiteral("firmwareType")).toInt(MAV_AUTOPILOT_ARDUPILOTMEGA);
     const int vehicleType = params.value(QStringLiteral("vehicleType")).toInt(MAV_TYPE_QUADROTOR);
 
@@ -202,6 +203,13 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
             if (cameraCalc->adjustedFootprintFrontal()) {
                 cameraCalc->adjustedFootprintFrontal()->setRawValue(triggerDistance);
             }
+        }
+    }
+
+    // Rotate entry point if specified (0: TopLeft, 1: TopRight, 2: BottomLeft, 3: BottomRight)
+    if (entryLocation > 0) {
+        for (int i = 0; i < (entryLocation % 4); ++i) {
+            surveyItem->rotateEntryPoint();
         }
     }
 
