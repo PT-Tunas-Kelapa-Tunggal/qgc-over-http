@@ -10,6 +10,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/CustomPlugin.h
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveyGeneratorService.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveyGeneratorService.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.h
         CACHE INTERNAL "" FORCE
     )
     set(CUSTOM_LIBRARIES
@@ -25,6 +27,8 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/CustomPlugin.h
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveyGeneratorService.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveyGeneratorService.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.h
         CACHE INTERNAL "" FORCE
     )
 endif()

@@ -1,7 +1,11 @@
 #include "SurveyGeneratorService.h"
+#include "SurveySafetyPlanner.h"
 
 #include "PlanMasterController.h"
 #include "MissionController.h"
+#include "MissionSettingsItem.h"
+#include "SimpleMissionItem.h"
+#include "SpeedSection.h"
 #include "SurveyComplexItem.h"
 #include "CameraCalc.h"
 #include "QGCMapPolygon.h"
@@ -97,12 +101,25 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
     const int entryLocation = params.value(QStringLiteral("entryLocation")).toInt(0);
     const int firmwareType = params.value(QStringLiteral("firmwareType")).toInt(MAV_AUTOPILOT_ARDUPILOTMEGA);
     const int vehicleType = params.value(QStringLiteral("vehicleType")).toInt(MAV_TYPE_QUADROTOR);
+    const double ascentSpeed = params.value(QStringLiteral("ascentSpeed")).toDouble(2.5);
+    const double descentSpeed = params.value(QStringLiteral("descentSpeed")).toDouble(1.5);
 
     // Defensive parameter checks
-    if (!std::isfinite(altitude) || altitude <= 0.0 || !std::isfinite(speed) || speed <= 0.0) {
+    if (!std::isfinite(altitude) || altitude <= 0.0 || !std::isfinite(speed) || speed <= 0.0 ||
+        !std::isfinite(ascentSpeed) || ascentSpeed <= 0.0 || !std::isfinite(descentSpeed) || descentSpeed <= 0.0) {
         QJsonObject errObj;
         errObj["status"] = QStringLiteral("error");
-        errObj["message"] = QStringLiteral("Altitude and speed must be positive finite numbers");
+        errObj["message"] = QStringLiteral("Altitude and speeds (flight, ascent, descent) must be positive finite numbers");
+        responseJsonStr = QJsonDocument(errObj).toJson(QJsonDocument::Compact).toStdString();
+        return 400;
+    }
+
+    SurveySafetyConfig safetyConfig;
+    QString safetyError;
+    if (!SurveySafetyPlanner::parseConfig(reqObj, params, centerCoord, altitude, turnaroundDistance, safetyConfig, safetyError)) {
+        QJsonObject errObj;
+        errObj["status"] = QStringLiteral("error");
+        errObj["message"] = safetyError;
         responseJsonStr = QJsonDocument(errObj).toJson(QJsonDocument::Compact).toStdString();
         return 400;
     }
@@ -142,8 +159,45 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
         return 500;
     }
 
-    // Insert Takeoff
-    missionCtrl->insertTakeoffItem(centerCoord, -1);
+    // Configure Planned Home Position & Horizontal Flight Speed on MissionSettingsItem
+    missionCtrl->setHomePosition(safetyConfig.homeCoord);
+    if (missionCtrl->visualItems() && missionCtrl->visualItems()->count() > 0) {
+        MissionSettingsItem* settingsItem = missionCtrl->visualItems()->value<MissionSettingsItem*>(0);
+        if (settingsItem && settingsItem->speedSection()) {
+            settingsItem->speedSection()->setSpecifyFlightSpeed(true);
+            if (settingsItem->speedSection()->flightSpeed()) {
+                settingsItem->speedSection()->flightSpeed()->setRawValue(speed);
+            }
+        }
+    }
+
+    // Insert Takeoff at Home
+    VisualMissionItem* takeoffVisual = missionCtrl->insertTakeoffItem(safetyConfig.homeCoord, -1);
+    if (SimpleMissionItem* takeoffSimple = qobject_cast<SimpleMissionItem*>(takeoffVisual)) {
+        if (takeoffSimple->altitude()) {
+            takeoffSimple->altitude()->setRawValue(altitude);
+        }
+    }
+
+    // Insert Ascent Speed (MAV_CMD_DO_CHANGE_SPEED, speed_type = 2: Climb Speed)
+    if (SimpleMissionItem* climbSpeedItem = qobject_cast<SimpleMissionItem*>(
+            missionCtrl->insertSimpleMissionItem(safetyConfig.homeCoord, -1))) {
+        climbSpeedItem->setCommand(MAV_CMD_DO_CHANGE_SPEED);
+        climbSpeedItem->missionItem().setParam1(2.0);
+        climbSpeedItem->missionItem().setParam2(ascentSpeed);
+        climbSpeedItem->missionItem().setParam3(-1.0);
+        climbSpeedItem->missionItem().setParam4(0.0);
+    }
+
+    // Insert Descent Speed (MAV_CMD_DO_CHANGE_SPEED, speed_type = 3: Descent Speed)
+    if (SimpleMissionItem* descentSpeedItem = qobject_cast<SimpleMissionItem*>(
+            missionCtrl->insertSimpleMissionItem(safetyConfig.homeCoord, -1))) {
+        descentSpeedItem->setCommand(MAV_CMD_DO_CHANGE_SPEED);
+        descentSpeedItem->missionItem().setParam1(3.0);
+        descentSpeedItem->missionItem().setParam2(descentSpeed);
+        descentSpeedItem->missionItem().setParam3(-1.0);
+        descentSpeedItem->missionItem().setParam4(0.0);
+    }
 
     // Insert Survey Complex Item
     VisualMissionItem* complexItem = missionCtrl->insertComplexMissionItem(
@@ -251,8 +305,16 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
         }
     }
 
-    // Insert Return to Launch / Land
-    missionCtrl->insertLandItem(centerCoord, -1);
+    // Insert Return to Launch (when returnToHome is true) or Land at Home (when false)
+    VisualMissionItem* endVisual = missionCtrl->insertLandItem(safetyConfig.homeCoord, -1);
+    if (!safetyConfig.returnToHome) {
+        if (SimpleMissionItem* endSimple = qobject_cast<SimpleMissionItem*>(endVisual)) {
+            endSimple->setCommand(MAV_CMD_NAV_LAND);
+        }
+    }
+
+    // Configure Geofence in QGC GeoFenceController
+    SurveySafetyPlanner::applyGeoFence(masterController, boundaryCoords, surveyItem, safetyConfig);
 
     // Extract visual transect points
     QJsonArray visualPointsArray;
@@ -271,35 +333,51 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
     // Flush event loop to allow queued signals to execute (such as mission flight status)
     QCoreApplication::processEvents();
 
-    double flightTime = missionCtrl->missionTime();
-    if ((!std::isfinite(flightTime) || flightTime <= 0.0) && speed > 0.0) {
-        double surveyDist = surveyItem->complexDistance();
-        double climbDescentTime = (altitude / 2.5) * 2.0; // 2.5 m/s climb/descent
-        double turnaroundTime = (double)surveyItem->_transectCount() * (turnaroundDistance * 2.0 / speed);
-        flightTime = (surveyDist / speed) + turnaroundTime + climbDescentTime;
+    // Serialize full plan JSON and apply general waypoint hold duration + safety evaluation
+    QJsonObject planObj = masterController.saveToJson().object();
+    SurveySafetyStats safetyStats;
+    const QJsonObject safetyObj = SurveySafetyPlanner::applyHoldAndEvaluateSafety(
+        masterController, safetyConfig, planObj, safetyStats);
+
+    const double surveyDist = surveyItem->complexDistance();
+    double transitDist = 0.0;
+    if (safetyConfig.homeCoord.isValid() && !transectPoints.isEmpty()) {
+        const QGeoCoordinate firstPt = transectPoints.first().value<QGeoCoordinate>();
+        const QGeoCoordinate lastPt = transectPoints.last().value<QGeoCoordinate>();
+        if (firstPt.isValid()) {
+            transitDist += safetyConfig.homeCoord.distanceTo(firstPt);
+        }
+        if (safetyConfig.returnToHome && lastPt.isValid()) {
+            transitDist += lastPt.distanceTo(safetyConfig.homeCoord);
+        }
     }
+
+    const double climbDescentTime = (altitude / ascentSpeed) + (altitude / descentSpeed);
+    const double horizontalTime = (surveyDist + transitDist) / speed;
+    const double flightTime = horizontalTime + climbDescentTime + safetyStats.holdTimeSeconds;
 
     // Extract mission metrics
     QJsonObject statsObj;
-    statsObj[QStringLiteral("totalDistanceMeters")] = surveyItem->complexDistance();
+    statsObj[QStringLiteral("totalDistanceMeters")] = surveyDist + transitDist;
     statsObj[QStringLiteral("flightTimeSeconds")] = flightTime;
     statsObj[QStringLiteral("coveredAreaSquareMeters")] = surveyItem->coveredArea();
     statsObj[QStringLiteral("photoCount")] = surveyItem->cameraShots();
     statsObj[QStringLiteral("transectCount")] = surveyItem->_transectCount();
+    statsObj[QStringLiteral("waypointCount")] = safetyStats.waypointCount;
+    statsObj[QStringLiteral("holdTimeSeconds")] = safetyStats.holdTimeSeconds;
+    statsObj[QStringLiteral("maxMissionAltitude")] = safetyStats.maxMissionAltitude;
     if (cameraCalc) {
         statsObj[QStringLiteral("calculatedLineSpacing")] = cameraCalc->adjustedFootprintSide() ? cameraCalc->adjustedFootprintSide()->rawValue().toDouble() : 0.0;
         statsObj[QStringLiteral("calculatedTriggerDistance")] = cameraCalc->adjustedFootprintFrontal() ? cameraCalc->adjustedFootprintFrontal()->rawValue().toDouble() : 0.0;
         statsObj[QStringLiteral("groundResolutionCmPerPx")] = cameraCalc->imageDensity() ? cameraCalc->imageDensity()->rawValue().toDouble() : 0.0;
     }
 
-    // Serialize full plan JSON
-    const QJsonDocument planDoc = masterController.saveToJson();
-
     QJsonObject rootResponse;
     rootResponse[QStringLiteral("status")] = QStringLiteral("ok");
     rootResponse[QStringLiteral("statistics")] = statsObj;
+    rootResponse[QStringLiteral("safety")] = safetyObj;
     rootResponse[QStringLiteral("visualTransectPoints")] = visualPointsArray;
-    rootResponse[QStringLiteral("plan")] = planDoc.object();
+    rootResponse[QStringLiteral("plan")] = planObj;
 
     responseJsonStr = QJsonDocument(rootResponse).toJson(QJsonDocument::Compact).toStdString();
     return 200;
