@@ -13,6 +13,7 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonArray>
+#include <QtCore/QCoreApplication>
 #include <QtPositioning/QGeoCoordinate>
 
 #include <cmath>
@@ -75,14 +76,14 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
     const QGeoCoordinate centerCoord(sumLat / boundaryCoords.count(), sumLon / boundaryCoords.count());
 
     const QJsonObject params = reqObj.value(QStringLiteral("parameters")).toObject();
-    const double altitude = params.value(QStringLiteral("altitude")).toDouble(50.0);
+    const double altitude = params.value(QStringLiteral("altitude")).toDouble(30.0);
     const double speed = params.value(QStringLiteral("speed")).toDouble(5.0);
     const double gridAngle = params.value(QStringLiteral("gridAngle")).toDouble(0.0);
     const double turnaroundDistance = params.value(QStringLiteral("turnaroundDistance")).toDouble(10.0);
     const bool hoverAndCapture = params.value(QStringLiteral("hoverAndCapture")).toBool(false);
-    const bool useCameraOverlap = params.value(QStringLiteral("useCameraOverlap")).toBool(false);
+    const bool useCameraOverlap = params.value(QStringLiteral("useCameraOverlap")).toBool(true);
 
-    double frontalOverlap = params.value(QStringLiteral("frontalOverlap")).toDouble(70.0);
+    double frontalOverlap = params.value(QStringLiteral("frontalOverlap")).toDouble(75.0);
     double sideOverlap = params.value(QStringLiteral("sideOverlap")).toDouble(70.0);
     if (frontalOverlap > 0.0 && frontalOverlap <= 1.0) {
         frontalOverlap *= 100.0;
@@ -111,6 +112,9 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
     if (appSettings) {
         if (appSettings->offlineEditingCruiseSpeed()) {
             appSettings->offlineEditingCruiseSpeed()->setRawValue(speed);
+        }
+        if (appSettings->offlineEditingHoverSpeed()) {
+            appSettings->offlineEditingHoverSpeed()->setRawValue(speed);
         }
         if (appSettings->offlineEditingFirmwareClass()) {
             appSettings->offlineEditingFirmwareClass()->setRawValue(
@@ -189,6 +193,40 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
         }
 
         if (useCameraOverlap) {
+            QString cameraName = params.value(QStringLiteral("cameraName")).toString();
+            if (!cameraName.isEmpty() && cameraName != CameraCalc::canonicalCustomCameraName() && cameraName != CameraCalc::canonicalManualCameraName()) {
+                cameraCalc->setCameraBrand(cameraName);
+            } else {
+                QJsonObject spec = params.value(QStringLiteral("cameraSpec")).toObject();
+                // Default to iPhone 17 Main Camera (24MP mode)
+                double sensorWidth = spec.value(QStringLiteral("sensorWidth")).toDouble(8.19);
+                double sensorHeight = spec.value(QStringLiteral("sensorHeight")).toDouble(6.14);
+                double focalLength = spec.value(QStringLiteral("focalLength")).toDouble(6.86);
+                int imageWidth = spec.value(QStringLiteral("imageWidth")).toInt(5712);
+                int imageHeight = spec.value(QStringLiteral("imageHeight")).toInt(4284);
+                bool landscape = spec.value(QStringLiteral("landscape")).toBool(true);
+
+                cameraCalc->setCameraBrand(CameraCalc::canonicalCustomCameraName());
+                if (cameraCalc->sensorWidth()) {
+                    cameraCalc->sensorWidth()->setRawValue(sensorWidth);
+                }
+                if (cameraCalc->sensorHeight()) {
+                    cameraCalc->sensorHeight()->setRawValue(sensorHeight);
+                }
+                if (cameraCalc->focalLength()) {
+                    cameraCalc->focalLength()->setRawValue(focalLength);
+                }
+                if (cameraCalc->imageWidth()) {
+                    cameraCalc->imageWidth()->setRawValue(imageWidth);
+                }
+                if (cameraCalc->imageHeight()) {
+                    cameraCalc->imageHeight()->setRawValue(imageHeight);
+                }
+                if (cameraCalc->landscape()) {
+                    cameraCalc->landscape()->setRawValue(landscape);
+                }
+            }
+
             if (cameraCalc->frontalOverlap()) {
                 cameraCalc->frontalOverlap()->setRawValue(frontalOverlap);
             }
@@ -230,13 +268,29 @@ int SurveyGeneratorService::generateSurveyPlan(const std::string& requestJsonStr
         }
     }
 
+    // Flush event loop to allow queued signals to execute (such as mission flight status)
+    QCoreApplication::processEvents();
+
+    double flightTime = missionCtrl->missionTime();
+    if ((!std::isfinite(flightTime) || flightTime <= 0.0) && speed > 0.0) {
+        double surveyDist = surveyItem->complexDistance();
+        double climbDescentTime = (altitude / 2.5) * 2.0; // 2.5 m/s climb/descent
+        double turnaroundTime = (double)surveyItem->_transectCount() * (turnaroundDistance * 2.0 / speed);
+        flightTime = (surveyDist / speed) + turnaroundTime + climbDescentTime;
+    }
+
     // Extract mission metrics
     QJsonObject statsObj;
     statsObj[QStringLiteral("totalDistanceMeters")] = surveyItem->complexDistance();
-    statsObj[QStringLiteral("flightTimeSeconds")] = missionCtrl->missionTime();
+    statsObj[QStringLiteral("flightTimeSeconds")] = flightTime;
     statsObj[QStringLiteral("coveredAreaSquareMeters")] = surveyItem->coveredArea();
     statsObj[QStringLiteral("photoCount")] = surveyItem->cameraShots();
     statsObj[QStringLiteral("transectCount")] = surveyItem->_transectCount();
+    if (cameraCalc) {
+        statsObj[QStringLiteral("calculatedLineSpacing")] = cameraCalc->adjustedFootprintSide() ? cameraCalc->adjustedFootprintSide()->rawValue().toDouble() : 0.0;
+        statsObj[QStringLiteral("calculatedTriggerDistance")] = cameraCalc->adjustedFootprintFrontal() ? cameraCalc->adjustedFootprintFrontal()->rawValue().toDouble() : 0.0;
+        statsObj[QStringLiteral("groundResolutionCmPerPx")] = cameraCalc->imageDensity() ? cameraCalc->imageDensity()->rawValue().toDouble() : 0.0;
+    }
 
     // Serialize full plan JSON
     const QJsonDocument planDoc = masterController.saveToJson();
