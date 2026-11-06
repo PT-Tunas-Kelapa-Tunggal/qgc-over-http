@@ -12,6 +12,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveyGeneratorService.h
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/VehicleBridgeService.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/VehicleBridgeService.h
         CACHE INTERNAL "" FORCE
     )
     set(CUSTOM_LIBRARIES
@@ -29,6 +31,8 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveyGeneratorService.h
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/SurveySafetyPlanner.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/VehicleBridgeService.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/VehicleBridgeService.h
         CACHE INTERNAL "" FORCE
     )
 endif()
@@ -38,9 +42,11 @@ set(CUSTOM_INCLUDE_DIRECTORIES
     ${CMAKE_SOURCE_DIR}/src/MissionManager
     ${CMAKE_SOURCE_DIR}/src/QmlControls
     ${CMAKE_SOURCE_DIR}/src/Vehicle
+    ${CMAKE_SOURCE_DIR}/src/Vehicle/FactGroups
     ${CMAKE_SOURCE_DIR}/src/FactSystem
     ${CMAKE_SOURCE_DIR}/src/Settings
     ${CMAKE_SOURCE_DIR}/src/MAVLink
+    ${CMAKE_SOURCE_DIR}/src/MAVLink/LibEvents
     CACHE INTERNAL "" FORCE
 )
 

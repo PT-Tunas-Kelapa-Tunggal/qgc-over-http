@@ -20,6 +20,7 @@
 #include <thread>
 
 #include "SurveyGeneratorService.h"
+#include "VehicleBridgeService.h"
 #include <QtCore/QMetaObject>
 
 QGC_LOGGING_CATEGORY(CustomPluginLog, "Custom.Plugin")
@@ -81,6 +82,32 @@ void CustomPlugin::_startServer()
         // Dispatched synchronously to the Qt main GUI thread
         QMetaObject::invokeMethod(qGuiApp, [&]() {
             statusCode = SurveyGeneratorService::generateSurveyPlan(req.body, responseBody);
+        }, Qt::BlockingQueuedConnection);
+
+        res.status = statusCode;
+        res.set_content(responseBody, "application/json");
+    });
+
+    s_httpServer->Get("/api/v1/vehicles", [](const httplib::Request &, httplib::Response &res) {
+        std::string responseBody;
+        int statusCode = 200;
+
+        QMetaObject::invokeMethod(qGuiApp, [&]() {
+            statusCode = VehicleBridgeService::getVehiclesJson(responseBody);
+        }, Qt::BlockingQueuedConnection);
+
+        res.status = statusCode;
+        res.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+        res.set_header("Pragma", "no-cache");
+        res.set_content(responseBody, "application/json");
+    });
+
+    s_httpServer->Post("/api/v1/vehicles/command", [](const httplib::Request &req, httplib::Response &res) {
+        std::string responseBody;
+        int statusCode = 200;
+
+        QMetaObject::invokeMethod(qGuiApp, [&]() {
+            statusCode = VehicleBridgeService::executeVehicleCommand(req.body, responseBody);
         }, Qt::BlockingQueuedConnection);
 
         res.status = statusCode;
