@@ -7,11 +7,17 @@
 #include "HealthAndArmingCheckReport.h"
 #include "VehicleGPSFactGroup.h"
 #include "BatteryFactGroupListModel.h"
+#include "PlanMasterController.h"
+#include "MissionController.h"
+#include "MissionManager.h"
 #include "QGCLoggingCategory.h"
 
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonArray>
+#include <QtCore/QEventLoop>
+#include <QtCore/QTimer>
+#include <QtCore/QTemporaryFile>
 
 QGC_LOGGING_CATEGORY(VehicleBridgeServiceLog, "Custom.VehicleBridgeService")
 
@@ -227,42 +233,197 @@ int VehicleBridgeService::executeVehicleCommand(const std::string &requestBody, 
 
     qCDebug(VehicleBridgeServiceLog) << "Executing command:" << command << "on vehicle" << targetVehicle->id();
 
+    // Check pre-arm conditions upfront for arm command
+    if (command == QStringLiteral("arm")) {
+        HealthAndArmingCheckReport *report = targetVehicle->healthAndArmingCheckReport();
+        if (report && !report->canArm()) {
+            QStringList problemMsgs;
+            QmlObjectListModel *problems = report->problemsForCurrentMode();
+            if (problems) {
+                for (int i = 0; i < problems->count(); ++i) {
+                    HealthAndArmingCheckProblem *prob = qobject_cast<HealthAndArmingCheckProblem*>(problems->get(i));
+                    if (prob) {
+                        problemMsgs.append(prob->message());
+                    }
+                }
+            }
+            const QString reason = problemMsgs.isEmpty() ? QStringLiteral("Autopilot safety checks belum terpenuhi.") : problemMsgs.join(QStringLiteral(", "));
+            QJsonObject err;
+            err["status"] = QStringLiteral("error");
+            err["message"] = QStringLiteral("Drone tidak dapat di-arm: ") + reason;
+            err["vehicleId"] = targetVehicle->id();
+            responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+            return 422;
+        }
+    }
+
     if (command == QStringLiteral("set_active")) {
         mvm->setActiveVehicle(targetVehicle);
-    } else if (command == QStringLiteral("arm")) {
+        QJsonObject resp;
+        resp["status"] = QStringLiteral("ok");
+        resp["command"] = command;
+        resp["vehicleId"] = targetVehicle->id();
+        responseBody = QJsonDocument(resp).toJson(QJsonDocument::Compact).toStdString();
+        return 200;
+    }
+
+    targetVehicle->setPrearmError(QString());
+
+    bool ackReceived = false;
+    int receivedAckResult = -1;
+    bool successStateObserved = false;
+
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+
+    auto connAck = QObject::connect(targetVehicle, &Vehicle::mavCommandResult, &loop,
+        [&](int vId, int /*targetComponent*/, int /*cmd*/, int ackResult, int /*failureCode*/) {
+            if (vId == targetVehicle->id()) {
+                ackReceived = true;
+                receivedAckResult = ackResult;
+                loop.quit();
+            }
+        });
+
+    auto connArmed = QObject::connect(targetVehicle, &Vehicle::armedChanged, &loop, [&](bool armed) {
+        if ((command == QStringLiteral("arm") && armed) || (command == QStringLiteral("disarm") && !armed)) {
+            successStateObserved = true;
+            loop.quit();
+        }
+    });
+
+    const QString reqModeName = paramVal.toString();
+    auto connMode = QObject::connect(targetVehicle, &Vehicle::flightModeChanged, &loop, [&](const QString &mode) {
+        if (command == QStringLiteral("set_mode") && mode.compare(reqModeName, Qt::CaseInsensitive) == 0) {
+            successStateObserved = true;
+            loop.quit();
+        } else if (command == QStringLiteral("rtl") && (mode == QStringLiteral("RTL") || mode == QStringLiteral("Return"))) {
+            successStateObserved = true;
+            loop.quit();
+        } else if (command == QStringLiteral("land") && mode == QStringLiteral("Land")) {
+            successStateObserved = true;
+            loop.quit();
+        } else if (command == QStringLiteral("start_mission") && (mode == QStringLiteral("Auto") || mode == QStringLiteral("Mission"))) {
+            successStateObserved = true;
+            loop.quit();
+        }
+    });
+
+    auto connTimer = QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    timer.start(2500); // 2.5s timeout for MAVLink command acknowledgment
+
+    if (command == QStringLiteral("arm")) {
         targetVehicle->setArmedShowError(true);
+        loop.exec();
     } else if (command == QStringLiteral("disarm")) {
         targetVehicle->setArmedShowError(false);
+        loop.exec();
     } else if (command == QStringLiteral("set_mode")) {
-        const QString modeName = paramVal.toString();
-        if (modeName.isEmpty()) {
+        if (reqModeName.isEmpty()) {
             QJsonObject err;
             err["status"] = QStringLiteral("error");
             err["message"] = QStringLiteral("Missing or invalid 'param' (flight mode name) for set_mode command");
             responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
             return 400;
         }
-        targetVehicle->setFlightMode(modeName);
+        targetVehicle->setFlightMode(reqModeName);
+        loop.exec();
     } else if (command == QStringLiteral("takeoff")) {
         const double alt = paramVal.isDouble() ? paramVal.toDouble() : 10.0;
         targetVehicle->guidedModeTakeoff(alt);
+        loop.exec();
     } else if (command == QStringLiteral("rtl")) {
         targetVehicle->guidedModeRTL(false);
+        loop.exec();
     } else if (command == QStringLiteral("pause") || command == QStringLiteral("hold")) {
         targetVehicle->pauseVehicle();
+        loop.exec();
     } else if (command == QStringLiteral("land")) {
         targetVehicle->guidedModeLand();
+        loop.exec();
     } else if (command == QStringLiteral("start_mission")) {
         targetVehicle->startMission();
+        loop.exec();
     } else if (command == QStringLiteral("emergency_stop")) {
         targetVehicle->emergencyStop();
+        loop.exec();
+    } else if (command == QStringLiteral("set_home")) {
+        if (paramVal.isObject()) {
+            const QJsonObject coord = paramVal.toObject();
+            if (coord.contains(QStringLiteral("latitude")) && coord.contains(QStringLiteral("longitude"))) {
+                const float lat = static_cast<float>(coord.value(QStringLiteral("latitude")).toDouble());
+                const float lon = static_cast<float>(coord.value(QStringLiteral("longitude")).toDouble());
+                const float alt = static_cast<float>(coord.value(QStringLiteral("altitude")).toDouble(0.0));
+                targetVehicle->sendMavCommand(targetVehicle->defaultComponentId(),
+                                               MAV_CMD_DO_SET_HOME, true,
+                                               0.0f, 0.0f, 0.0f, 0.0f,
+                                               lat, lon, alt);
+            } else {
+                targetVehicle->sendMavCommand(targetVehicle->defaultComponentId(),
+                                               MAV_CMD_DO_SET_HOME, true,
+                                               1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            }
+        } else {
+            targetVehicle->sendMavCommand(targetVehicle->defaultComponentId(),
+                                           MAV_CMD_DO_SET_HOME, true,
+                                           1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        }
+        loop.exec();
     } else {
+        QObject::disconnect(connAck);
+        QObject::disconnect(connArmed);
+        QObject::disconnect(connMode);
+        QObject::disconnect(connTimer);
         QJsonObject err;
         err["status"] = QStringLiteral("error");
         err["message"] = QStringLiteral("Unknown command: ") + command;
         responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
         return 400;
     }
+
+    QObject::disconnect(connAck);
+    QObject::disconnect(connArmed);
+    QObject::disconnect(connMode);
+    QObject::disconnect(connTimer);
+
+    if (successStateObserved || (ackReceived && receivedAckResult == MAV_RESULT_ACCEPTED)) {
+        QJsonObject resp;
+        resp["status"] = QStringLiteral("ok");
+        resp["command"] = command;
+        resp["vehicleId"] = targetVehicle->id();
+        responseBody = QJsonDocument(resp).toJson(QJsonDocument::Compact).toStdString();
+        return 200;
+    }
+
+    if (ackReceived && receivedAckResult != MAV_RESULT_ACCEPTED) {
+        const QString prearm = targetVehicle->prearmError();
+        const QString msg = !prearm.isEmpty() ? prearm : QStringLiteral("Perintah ditolak oleh drone (%1).").arg(QGCMAVLink::mavResultToString(static_cast<MAV_RESULT>(receivedAckResult)));
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = msg;
+        err["vehicleId"] = targetVehicle->id();
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 422;
+    }
+
+    if (!targetVehicle->prearmError().isEmpty()) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = targetVehicle->prearmError();
+        err["vehicleId"] = targetVehicle->id();
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 422;
+    }
+
+    QJsonObject err;
+    err["status"] = QStringLiteral("error");
+    err["message"] = QStringLiteral("Drone tidak merespons perintah dalam batas waktu (Timeout 2.5s)");
+    err["vehicleId"] = targetVehicle->id();
+    responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    return 504;
+}
 
 int VehicleBridgeService::uploadPlanToVehicle(const std::string &requestBody, std::string &responseBody)
 {
