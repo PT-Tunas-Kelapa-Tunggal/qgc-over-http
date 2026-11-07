@@ -114,10 +114,27 @@ void CustomPlugin::_startServer()
         res.set_content(responseBody, "application/json");
     });
 
+    s_httpServer->Post("/api/v1/plan/upload", [](const httplib::Request &req, httplib::Response &res) {
+        std::string responseBody;
+        int statusCode = 200;
+
+        QMetaObject::invokeMethod(qGuiApp, [&]() {
+            statusCode = VehicleBridgeService::uploadPlanToVehicle(req.body, responseBody);
+        }, Qt::BlockingQueuedConnection);
+
+        res.status = statusCode;
+        res.set_content(responseBody, "application/json");
+    });
+
     s_httpThread = std::make_unique<std::thread>([]() {
-        qCDebug(CustomPluginLog) << "Starting embedded health-check HTTP server on 127.0.0.1:18080";
+        bool ok = false;
+        int port = qEnvironmentVariableIntValue("QGC_HTTP_PORT", &ok);
+        if (!ok || port <= 0 || port > 65535) {
+            port = 18080;
+        }
+        qCDebug(CustomPluginLog) << "Starting embedded health-check HTTP server on 127.0.0.1:" << port;
         if (s_httpServer) {
-            s_httpServer->listen("127.0.0.1", 18080);
+            s_httpServer->listen("127.0.0.1", port);
         }
         qCDebug(CustomPluginLog) << "Embedded health-check HTTP server stopped";
     });

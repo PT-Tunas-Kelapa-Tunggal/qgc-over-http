@@ -141,6 +141,18 @@ void CustomPlugin::_startServer()
         res.set_content(responseBody, "application/json");
     });
 
+    s_httpServer->Post("/api/v1/plan/upload", [](const httplib::Request &req, httplib::Response &res) {
+        std::string responseBody;
+        int statusCode = 200;
+
+        QMetaObject::invokeMethod(qGuiApp, [&]() {
+            statusCode = VehicleBridgeService::uploadPlanToVehicle(req.body, responseBody);
+        }, Qt::BlockingQueuedConnection);
+
+        res.status = statusCode;
+        res.set_content(responseBody, "application/json");
+    });
+
     s_httpThread = std::make_unique<std::thread>([]() {
         bool ok = false;
         int port = qEnvironmentVariableIntValue("QGC_HTTP_PORT", &ok);

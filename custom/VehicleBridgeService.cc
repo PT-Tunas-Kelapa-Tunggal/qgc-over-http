@@ -239,9 +239,135 @@ int VehicleBridgeService::executeVehicleCommand(const std::string &requestBody, 
         return 400;
     }
 
+int VehicleBridgeService::uploadPlanToVehicle(const std::string &requestBody, std::string &responseBody)
+{
+    QJsonParseError parseError;
+    const QJsonDocument reqDoc = QJsonDocument::fromJson(QByteArray::fromStdString(requestBody), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !reqDoc.isObject()) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("Invalid JSON payload: ") + parseError.errorString();
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 400;
+    }
+
+    MultiVehicleManager *mvm = MultiVehicleManager::instance();
+    if (!mvm) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("MultiVehicleManager is unavailable");
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 500;
+    }
+
+    const QJsonObject reqObj = reqDoc.object();
+    Vehicle *targetVehicle = nullptr;
+    if (reqObj.contains(QStringLiteral("vehicleId"))) {
+        const int vehicleId = reqObj.value(QStringLiteral("vehicleId")).toInt();
+        targetVehicle = mvm->getVehicleById(vehicleId);
+    } else {
+        targetVehicle = mvm->activeVehicle();
+    }
+
+    if (!targetVehicle) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("No connected vehicle available or target vehicleId not found");
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 404;
+    }
+
+    QJsonObject planObj;
+    if (reqObj.contains(QStringLiteral("plan")) && reqObj.value(QStringLiteral("plan")).isObject()) {
+        planObj = reqObj.value(QStringLiteral("plan")).toObject();
+    } else if (reqObj.contains(QStringLiteral("mission")) && reqObj.value(QStringLiteral("mission")).isObject()) {
+        planObj = reqObj;
+    } else {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("Missing 'plan' object in payload");
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 400;
+    }
+
+    const QByteArray planBytes = QJsonDocument(planObj).toJson(QJsonDocument::Compact);
+
+    QTemporaryFile tempFile;
+    if (!tempFile.open()) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("Gagal membuat temporary file untuk plan");
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 500;
+    }
+    tempFile.write(planBytes);
+    tempFile.flush();
+    tempFile.close();
+
+    PlanMasterController masterController;
+    masterController.startStaticActiveVehicle(targetVehicle, false);
+    masterController.loadFromFile(tempFile.fileName());
+
+    MissionManager *missionMgr = targetVehicle->missionManager();
+    if (!missionMgr) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("Target vehicle mission manager is unavailable");
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 500;
+    }
+
+    bool uploadFinished = false;
+    bool uploadHasError = false;
+    QString uploadErrMsg;
+
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    timer.setInterval(8000); // 8 seconds timeout for MAVLink mission transfer
+
+    auto connComplete = QObject::connect(missionMgr, &PlanManager::sendComplete, &loop,
+        [&](bool error) {
+            uploadFinished = true;
+            uploadHasError = error;
+            loop.quit();
+        });
+
+    auto connError = QObject::connect(missionMgr, &PlanManager::error, &loop,
+        [&](int /*errorCode*/, const QString &errorMsg) {
+            uploadHasError = true;
+            uploadErrMsg = errorMsg;
+        });
+
+    auto connTimeout = QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    timer.start();
+    masterController.sendToVehicle();
+    loop.exec();
+
+    QObject::disconnect(connComplete);
+    QObject::disconnect(connError);
+    QObject::disconnect(connTimeout);
+
+    if (!uploadFinished && !uploadHasError) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = QStringLiteral("Waktu pengunggahan misi ke drone habis (Timeout 8s)");
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 504;
+    }
+
+    if (uploadHasError) {
+        QJsonObject err;
+        err["status"] = QStringLiteral("error");
+        err["message"] = uploadErrMsg.isEmpty() ? QStringLiteral("Gagal mengunggah misi ke drone") : uploadErrMsg;
+        responseBody = QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        return 422;
+    }
+
     QJsonObject resp;
     resp["status"] = QStringLiteral("ok");
-    resp["command"] = command;
+    resp["message"] = QStringLiteral("Misi berhasil diunggah ke drone");
     resp["vehicleId"] = targetVehicle->id();
     responseBody = QJsonDocument(resp).toJson(QJsonDocument::Compact).toStdString();
     return 200;

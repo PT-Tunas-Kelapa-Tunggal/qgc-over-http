@@ -12,7 +12,13 @@ public:
 
     /// Executes a flight or mode command on a connected vehicle.
     /// Request JSON format:
-    /// { "vehicleId": 1, "command": "arm|disarm|set_mode|takeoff|rtl|pause|land|start_mission|emergency_stop|set_active", "param": ... }
+    /// { "vehicleId": 1, "command": "arm|disarm|set_mode|takeoff|rtl|pause|land|start_mission|emergency_stop|set_active|set_home", "param": ... }
     /// MUST be called on the Qt main GUI thread.
     static int executeVehicleCommand(const std::string &requestBody, std::string &responseBody);
+
+    /// Uploads a mission plan JSON into the target vehicle's autopilot memory via MAVLink.
+    /// Request JSON format:
+    /// { "vehicleId": 1, "plan": { ...QGC plan JSON... } }
+    /// MUST be called on the Qt main GUI thread.
+    static int uploadPlanToVehicle(const std::string &requestBody, std::string &responseBody);
 };
