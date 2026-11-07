@@ -85,6 +85,31 @@ int VehicleBridgeService::getVehiclesJson(std::string &responseBody)
 
             HealthAndArmingCheckReport *armReport = v->healthAndArmingCheckReport();
             vObj["canArm"] = armReport ? armReport->canArm() : v->allSensorsHealthy();
+            vObj["prearmError"] = v->prearmError();
+
+            QJsonArray armingProblems;
+            if (armReport) {
+                QmlObjectListModel *problems = armReport->problemsForCurrentMode();
+                if (problems) {
+                    for (int pIdx = 0; pIdx < problems->count(); ++pIdx) {
+                        HealthAndArmingCheckProblem *problem = qobject_cast<HealthAndArmingCheckProblem*>(problems->get(pIdx));
+                        if (problem) {
+                            armingProblems.append(problem->message());
+                        }
+                    }
+                }
+            }
+            vObj["armingProblems"] = armingProblems;
+
+            QString latestErr = v->prearmError();
+            if (latestErr.isEmpty() && v->messageTypeError()) {
+                const QString fmt = v->formattedMessages();
+                const QStringList lines = fmt.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+                if (!lines.isEmpty()) {
+                    latestErr = lines.last();
+                }
+            }
+            vObj["latestError"] = latestErr;
 
             SysStatusSensorInfo *sensorInfo = qobject_cast<SysStatusSensorInfo*>(v->sysStatusSensorInfo());
             if (sensorInfo) {
